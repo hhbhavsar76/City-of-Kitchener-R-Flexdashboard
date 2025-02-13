@@ -1,0 +1,239 @@
+---
+title: "Kitchener Landmarks Dashboard"
+author: "Hiral Bhavsar"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    theme: cosmo
+---
+
+
+```{r setup, include=FALSE}
+# Load required libraries
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load("flexdashboard", "leaflet", "sf", "dplyr", "ggplot2", "plotly", 
+               "DT", "shiny", "tidyr", "ggrepel")
+
+# Load Landmark Data:
+arcgis_url <- "https://services1.arcgis.com/qAo1OsXi67t7XgmS/arcgis/rest/services/Landmarks/FeatureServer/0/query?outFields=*&where=1%3D1&f=geojson"
+landmark_data <- st_read(arcgis_url, quiet = TRUE)
+
+# Convert timestamps to standard date format:
+landmark_data <- landmark_data |>
+  mutate(
+    CREATE_DATE = as.Date(as.POSIXct(CREATE_DATE / 1000, origin="1970-01-01")),
+    UPDATE_DATE = as.Date(as.POSIXct(UPDATE_DATE / 1000, origin="1970-01-01")),
+    SOURCE_DATE = as.Date(as.POSIXct(SOURCE_DATE / 1000, origin="1970-01-01")),
+    STATUS = as.factor(STATUS),
+    CATEGORY = as.factor(CATEGORY)
+  )
+
+# To verify numeric and factor conversion:
+landmark_data <- landmark_data |>
+  mutate(
+    X_COORD = as.numeric(X_COORD),
+    Y_COORD = as.numeric(Y_COORD),
+    WARDID = as.numeric(WARDID),
+    PLANNINGCOMMUNITYID = as.numeric(PLANNINGCOMMUNITYID),
+    SUBCATEGORY = as.factor(SUBCATEGORY),
+    MUNICIPALITY = as.factor(MUNICIPALITY),
+    DIVISION_RESPONSIBLE = as.factor(DIVISION_RESPONSIBLE),
+    OWNERSHIP = as.factor(OWNERSHIP)
+  )
+
+# To handle missing values:
+landmark_data <- landmark_data |>
+  mutate(
+    CIVIC_NO = ifelse(is.na(CIVIC_NO), 0, CIVIC_NO),
+    UNIT_NO = ifelse(is.na(UNIT_NO), "Unknown", UNIT_NO),
+    BUILDINGID = ifelse(is.na(BUILDINGID), 0, BUILDINGID)
+  )
+
+# Remove columns which has missing or no data:
+landmark_data <- subset(landmark_data, select = -c(OBJECTID, HYPERLINK))
+
+# To ensure geometry is POINT type:
+landmark_data <- st_cast(landmark_data, "POINT") |>
+  mutate(Longitude = st_coordinates(geometry)[,1], Latitude = st_coordinates(geometry)[,2])
+
+# Classification of landmarks into five categories: 
+landmark_data$Class <- case_when(
+  landmark_data$CATEGORY %in% c("PARK", "PLAYGROUND", "DOG PARK", "TOBOGGAN HILL", "GOLF COURSE") ~ "Recreational Spaces",
+  landmark_data$CATEGORY %in% c("SPORTS SOCCER", "SPORTS BASKETBALL", "SPORTS TENNIS COURT", "SPORTS CRICKET", "SPORTS BALLDIAMOND", "SPORTS ARENA", "SPORTS POOL", "SPORTS MISC") ~ "Sports Facilities",
+  landmark_data$CATEGORY %in% c("LIBRARY", "LITTLE LIBRARY", "GOVERNMENT SERVICE", "EMERGENCY SERVICE", "SENIOR CARE FACILITY", "VULNERABLE SERVICES") ~ "Community & Public Services",
+  landmark_data$CATEGORY %in% c("PLACE OF WORSHIP", "ART AND ARTIFACTS", "INDIGENOUS RESOURCES", "CEMETERY") ~ "Cultural & Religious Sites",
+  landmark_data$CATEGORY %in% c("BUSINESS PARK", "OPERATIONS CENTRE", "COMMUNITY RESOURCE", "EDUCATION FACILITY") ~ "Urban Infrastructure",
+  TRUE ~ "Other"
+)
+```
+
+## 📋 Landmark Overview {.tabset}
+
+### 🏢 Landmark Data Table
+
+```{r}
+datatable(landmark_data |>
+            select(LANDMARK, Class, CATEGORY, MUNICIPALITY, OWNERSHIP, WARDID, CREATE_DATE),
+          options = list(pageLength = 10, scrollX = TRUE, autoWidth = TRUE, searchHighlight = TRUE),
+          rownames = FALSE)
+```
+
+### 📊 Landmark Distribution
+
+```{r}
+# Define specific colors to individual class:
+real_world_colors <- c(
+  "Community & Public Services" = "steelblue",  # Blue for government/public services
+  "Cultural & Religious Sites" = "forestgreen",  # Green for cultural/religious places
+  "Other" = "gray",  # Gray for unspecified categories
+  "Recreational Spaces" = "purple",  # Purple for parks/playgrounds
+  "Sports Facilities" = "red",  # Red for sports
+  "Urban Infrastructure" = "darkorange" # Orange for city infrastructure
+)
+
+landmark_counts <- landmark_data |>
+  group_by(Class, CATEGORY) |>
+  summarise(Total = n(), .groups = "drop")
+
+landmark_plot <- ggplot(landmark_counts, aes(
+  x = reorder(Class, -Total),  
+  y = Total,
+  fill = Class,
+  text = paste("Class:", Class, "<br>Category:", CATEGORY, "<br>Total:", Total)
+)) +
+  geom_bar(stat = "identity") +  
+  coord_flip() +
+  scale_fill_manual(values = real_world_colors) +  # ✅ Apply real-world colors here
+  theme_minimal() +
+  labs(
+    title = "Interactive Landmark Distribution by Class",
+    x = "Class",
+    y = "Number of Landmarks",
+    fill = "Landmark Class",
+    caption = "This chart represents the total count of landmarks categorized by Class and Category."
+  ) +
+  theme(legend.position = "right")
+
+ggplotly(landmark_plot, tooltip = "text")
+
+```
+
+### 📉 Time Series Analysis
+```{r}
+# Extract Year and count Landmarks by Class:
+landmark_trends <- landmark_data |>
+  mutate(Year = lubridate::year(CREATE_DATE)) |>
+  filter(!is.na(Year)) %>%
+  count(Year, Class) %>%
+  arrange(Year)
+
+
+# Line Chart:
+trend_chart <- ggplot(landmark_trends, aes(x = Year, y = n, color = Class)) +
+  geom_point(size = 2, alpha = 0.8) +  # Show actual data points
+  geom_line(size = 1, alpha = 0.8) +  # Connect the actual data points
+  labs(title = "Landmark Creation Trends Over Time",
+       subtitle = "3-Year Moving Average Applied for Clarity",
+       x = "Year", 
+       y = "Total Landmarks",
+       color = "Landmark Class") +
+  scale_x_continuous(breaks = seq(min(landmark_trends$Year), max(landmark_trends$Year), by = 3)) +  # Reduce x-axis clutter
+  scale_y_continuous(labels = scales::comma) +  # Format y-axis numbers
+  scale_color_manual(values = real_world_colors) +  # Apply real-world colors
+  theme_minimal() +
+  theme(legend.position = "right")
+
+# Convert to Interactive Plot:
+ggplotly(trend_chart)
+
+```
+### 🏛 Ownership Distribution 
+
+```{r}
+# Define ownership categories:
+selected_ownership <- c("KITCHENER", "PRIVATE")
+
+# Ensure OWNERSHIP is consistently formatted:
+filtered_data <- landmark_data |>
+  mutate(OWNERSHIP = toupper(OWNERSHIP)) |>  # Convert to uppercase
+  filter(OWNERSHIP %in% selected_ownership)
+
+# Count total landmarks by ownership type:
+ownership_count <- filtered_data |>
+  count(OWNERSHIP)
+
+# Calculate Ratio:
+kitchener_count <- ownership_count$n[ownership_count$OWNERSHIP == "KITCHENER"]
+private_count <- ownership_count$n[ownership_count$OWNERSHIP == "PRIVATE"]
+
+if (!is.na(kitchener_count) & !is.na(private_count) & private_count > 0) {
+  ownership_ratio <- round(kitchener_count / private_count, 1)  # Calculate how many times more
+} else {
+  ownership_ratio <- "N/A"  # Handle division by zero case
+}
+
+# Modify Ownership Labels to Include Ratio (for the legend only):
+ownership_count <- ownership_count |>
+  mutate(OWNERSHIP_DISPLAY = case_when(
+    OWNERSHIP == "KITCHENER" ~ paste0("KITCHENER (", ownership_ratio, "x more than PRIVATE)"),
+    TRUE ~ OWNERSHIP
+  ))
+
+# Create Bar Chart with Custom Tooltip:
+ownership_bar_chart <- ggplot(ownership_count, aes(x = OWNERSHIP_DISPLAY, y = n, fill = OWNERSHIP_DISPLAY, 
+                                                   text = paste0("Ownership: ", OWNERSHIP, 
+                                                                 "<br>Number of Landmarks: ", n))) +
+  geom_bar(stat = "identity", width = 0.6) +
+  labs(title = "Total Landmarks Owned by Kitchener vs Private",
+       x = "Ownership Type", 
+       y = "Number of Landmarks",
+       fill = "Ownership") +
+  theme_minimal() +
+  theme(legend.position = "top")  # Move legend to top
+
+# Convert to Interactive Plot with Custom Tooltip:
+ggplotly(ownership_bar_chart, tooltip = "text")
+
+
+```
+
+### Spatial Distribution (Map)
+```{r}
+# Define color palette for Class distribution
+color_palette <- colorFactor(
+  palette = real_world_colors,
+  domain = landmark_data$Class
+)
+
+# Create the Leaflet map
+leaflet(landmark_data) |>
+  addTiles() |>
+  addCircleMarkers(
+    lng = ~Longitude, 
+    lat = ~Latitude,
+    radius = 3,
+    color = ~color_palette(Class),
+    popup = ~paste0(
+      "<strong>Landmark: </strong>", LANDMARK, "<br>",
+      "<strong>Class: </strong>", Class, "<br>",
+      "<strong>Address: </strong>", STREET, "<br>",
+      "<strong>Created on: </strong>", CREATE_DATE, "<br>",
+      # To add image in the popup:
+     "<br/><img src = 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQUKAYuOjghdYK7J3p_Z27HOBjg04p0lAILPA&s' width = '150px'>",
+     # To add location link in the popup:
+      "<br/><a href='https://www.openstreetmap.org/?mlat=", Latitude, "&mlon=", Longitude, "' target='_blank'>View on OpenStreetMap</a><br>",
+     # To add source(reference) link in the popup:
+      "<a href='https://open-kitchenergis.opendata.arcgis.com/datasets/5dbeed2b0f5e4905934436709b4ac7f8_0/explore' target='_blank'>Source of Data</a>"
+    )
+  ) |>
+  addLegend(
+    "bottomright",
+    pal = color_palette,
+    values = ~Class,
+    title = "Landmark Class Distribution",
+    opacity = 1
+  )
+
+
+
